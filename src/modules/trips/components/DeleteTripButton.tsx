@@ -56,8 +56,9 @@ export function DeleteTripButton({
         messages, and media records. This can&rsquo;t be undone.
       </p>
       <p className="mt-1 text-xs text-red-600">
-        Media records are metadata only — Trip Chalo doesn&rsquo;t store photo or
-        video files yet, so no media files are affected.
+        Any photos or videos in this trip are removed too. Trip records are
+        deleted immediately; the underlying files are then cleaned up right
+        after and may take a short time to fully clear.
       </p>
 
       {state.error ? (

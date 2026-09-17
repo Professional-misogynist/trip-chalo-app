@@ -1,5 +1,22 @@
 export type ValidationResult = { valid: true } | { valid: false; error: string };
 
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Shape check for a media id taken from a URL segment, form field, or RPC
+ * parameter. Mirrors isTripId (trips/validation.ts) and isInvitationId
+ * (invitations/validation.ts) exactly: a well-formedness check, not an
+ * authorization check. Rejecting a malformed id before it reaches the
+ * database keeps it in the same "nothing here" bucket as a well-formed
+ * but inaccessible id, rather than surfacing a distinguishable Postgres
+ * 22P02 invalid-input error through a different code path — the same
+ * not-found-indistinguishability convention used throughout this project.
+ */
+export function isMediaId(value: string): boolean {
+  return UUID_PATTERN.test(value);
+}
+
 /**
  * Mirrors media_type_for_mime() in migration 0012, kept in sync manually.
  * This is a fast, friendly pre-check before round-tripping to the

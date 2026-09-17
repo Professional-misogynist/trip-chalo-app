@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import type { PostgrestError } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase/server";
 import { getCurrentUserId } from "@/modules/auth/session";
+import { deleteMediaObjectBestEffort } from "@/modules/storage/r2";
 import {
   isTripId,
   validateTripName,
@@ -180,10 +181,34 @@ export async function deleteTripAction(
 
   const supabase = await createClient();
 
-  // Ownership is enforced by trips_delete_owner (RLS, 0007). Cascading deletes
-  // on trip_members / invitations / media / messages happen at the database
-  // level (0003–0006 foreign keys) — no application-level cleanup is needed or
-  // attempted here. No archive path exists; this is a hard delete.
+  // Captured BEFORE the trip delete below: 0003–0006's ON DELETE CASCADE
+  // removes every media row for this trip synchronously within the same
+  // DELETE FROM trips statement, so by the time that call returns, these
+  // rows (and their storage_key values) are already gone and cannot be
+  // read back. Gated by media_select_member (0007) exactly like any other
+  // media read in this project — a caller who is a member but not the
+  // owner can see this list regardless of whether their subsequent delete
+  // attempt below succeeds, which discloses nothing beyond what the
+  // existing media listing query already shows them.
+  const { data: mediaRows, error: mediaLookupError } = await supabase
+    .from("media")
+    .select("storage_key")
+    .eq("trip_id", tripId);
+
+  if (mediaLookupError) {
+    logDatabaseError("delete (media lookup)", mediaLookupError);
+    // Not fatal — proceed with the trip delete attempt regardless. Losing
+    // the ability to best-effort clean up R2 objects is not a reason to
+    // block a trip deletion the owner is otherwise entitled to perform.
+  }
+
+  // Ownership is enforced by trips_delete_owner (RLS, 0007). Cascading
+  // deletes on trip_members / invitations / media / messages happen at
+  // the database level (0003–0006 foreign keys) — no application-level
+  // metadata cleanup is needed or attempted here. This is a hard delete
+  // of application metadata; R2 object cleanup for any media the trip
+  // had is attempted, best-effort, below, and never affects whether this
+  // delete itself succeeds.
   const { data, error } = await supabase
     .from("trips")
     .delete()
@@ -197,6 +222,19 @@ export async function deleteTripAction(
 
   if (data.length === 0) {
     return { error: "Only the trip owner can delete this trip." };
+  }
+
+  // DB deletion has already succeeded and is authoritative at this point —
+  // nothing below can turn this request into a failure from the user's
+  // perspective. R2 cleanup is strictly best-effort (PostgreSQL =
+  // authoritative application state, R2 = object storage): each object is
+  // attempted independently via a helper that swallows and logs its own
+  // errors (trip_id attached for actionable context), and a failure here
+  // is never reported as a trip-deletion failure.
+  if (mediaRows && mediaRows.length > 0) {
+    await Promise.all(
+      mediaRows.map((row) => deleteMediaObjectBestEffort(row.storage_key, { tripId }))
+    );
   }
 
   revalidatePath("/trips");

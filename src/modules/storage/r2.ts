@@ -12,6 +12,18 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
  * the AWS SDK v3 S3Client works against it with a custom endpoint.
  * Credentials come from server-only env vars — this file must never be
  * imported from a Client Component or exposed to the browser bundle.
+ *
+ * No `server-only` package import was added here: it isn't an
+ * established pattern anywhere else in this codebase (e.g.
+ * lib/supabase/server.ts, which holds comparably sensitive server-side
+ * logic, doesn't use it either), and introducing a new dependency purely
+ * for this would be inconsistent with the project's stated preference
+ * for avoiding unnecessary dependencies. The verified boundary today is:
+ * this file is never marked "use client" and is only ever imported from
+ * "use server" action files (media/actions.ts) — the same boundary
+ * lib/supabase/server.ts relies on. If stronger, build-time enforcement
+ * is wanted later, add `server-only` to package.json and
+ * `import "server-only";` as the first line of this file.
  */
 function getR2Client(): S3Client {
   const accountId = process.env.R2_ACCOUNT_ID;
@@ -97,12 +109,20 @@ export async function headMediaObject(
  * Best-effort only. DB-first deletion (approved decision) means the
  * database row is authoritative — an R2 failure here must never block or
  * roll back the DB operation that triggered it.
+ *
+ * `context` is optional and purely for logging (e.g. the trip_id a batch
+ * cleanup is running after, or the media_id a single delete belongs to),
+ * so a failure is actionable without the caller needing to duplicate its
+ * own try/catch around every call site.
  */
-export async function deleteMediaObjectBestEffort(storageKey: string): Promise<void> {
+export async function deleteMediaObjectBestEffort(
+  storageKey: string,
+  context?: Record<string, string>
+): Promise<void> {
   try {
     const client = getR2Client();
     await client.send(new DeleteObjectCommand({ Bucket: getBucketName(), Key: storageKey }));
   } catch (err) {
-    console.error("[storage] best-effort R2 delete failed", storageKey, err);
+    console.error("[storage] best-effort R2 delete failed", { storageKey, ...context, err });
   }
 }
