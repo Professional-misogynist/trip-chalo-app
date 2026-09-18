@@ -1,0 +1,84 @@
+-- 0015_media_select_owner.sql
+-- Phase 6 fix (D-1): mirrors the exact defect and fix pattern this
+-- project already applied for trips in 0009_trips_select_owner.sql.
+--
+-- THE GAP
+--
+-- media_delete_uploader_or_owner (0007) allows a media item's original
+-- uploader to delete it even after they are no longer a member of the
+-- trip:
+--
+--   using (uploader_id = auth.uid() or public.is_trip_owner(trip_id))
+--
+-- -- there is no current-membership requirement in the uploader
+-- disjunct. This is evidently intentional: a departed member should
+-- still be able to remove content they personally contributed.
+--
+-- media_select_member (0007), however, is:
+--
+--   using (public.is_trip_member(trip_id))
+--
+-- -- with no uploader-ownership disjunct at all. deleteMediaAction
+-- (media/actions.ts) performs `DELETE ... RETURNING storage_key,
+-- trip_id`. Per this project's own previously-documented and
+-- live-tested finding for the exact same class of interaction
+-- (0009_trips_select_owner.sql), a data-modifying statement's RETURNING
+-- clause is governed by the relation's SELECT policies, not by the
+-- policy that authorized the modification itself. A departed uploader's
+-- delete is therefore permitted by media_delete_uploader_or_owner but
+-- can then be blocked from being reported back to the caller because
+-- media_select_member no longer admits that row for that caller.
+--
+-- Concretely, this leaves deleteMediaAction unable to reliably complete
+-- for a departed uploader deleting their own historical media. Whether
+-- the exact PostgreSQL/PostgREST behavior for this specific DELETE case
+-- raises a hard error or silently omits the row from RETURNING was not
+-- independently re-tested against a live database as part of this fix
+-- -- but either outcome is a real defect (a permanent, misleadingly-
+-- worded failure, or a delete that succeeds at the database layer while
+-- being reported as failed and skipping the app's R2 cleanup step,
+-- orphaning the R2 object). This migration removes the underlying
+-- inconsistency regardless of which exact mechanism is in play.
+--
+-- THE FIX
+--
+-- Add an uploader-ownership disjunct to media_select_member, mirroring
+-- 0009's shape for trips_select_member.
+--
+-- UNLIKE 0009's owner_id = auth.uid() disjunct for trips (which 0009
+-- proved introduces NO widening of access on committed rows, because a
+-- trip's owner is provably always a current member via other
+-- invariants), this disjunct DOES introduce a small, intentional
+-- widening: a user who uploaded media to a trip and later left that
+-- trip will now be able to see (not just delete) their own past uploads
+-- for that trip, via any query that reaches this policy -- including
+-- listTripMedia(), not only the delete path. This is accepted as the
+-- minimum correct fix because:
+--
+--   (a) media_delete_uploader_or_owner (0007) already, deliberately,
+--       grants that same departed uploader the ability to delete that
+--       exact row regardless of current membership -- this migration
+--       only makes the SELECT boundary consistent with a DELETE
+--       authorization this project already approved, rather than
+--       expanding authorization beyond what 0007 already decided;
+--   (b) the widening is scoped to exactly the rows uploader_id =
+--       auth.uid() identifies -- a departed member gains no visibility
+--       into any OTHER member's media, and no visibility into any trip
+--       they never uploaded to;
+--   (c) it does not touch media_delete_uploader_or_owner, media INSERT
+--       (0012 already revoked direct client INSERT), or any other
+--       table's policies.
+--
+-- If this narrow widening is not the intended product behavior, the
+-- correct alternative is to instead remove the membership-independent
+-- uploader disjunct from media_delete_uploader_or_owner in a future
+-- migration -- that is a product decision, not made here; this
+-- migration only resolves the internal inconsistency between the two
+-- policies as they currently stand.
+
+alter policy media_select_member
+  on public.media
+  using (
+    uploader_id = auth.uid()
+    or public.is_trip_member(trip_id)
+  );
